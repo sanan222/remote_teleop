@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Teleoperation System</title>
+    <style>
+        body { font-family: monospace; background: #1a1a1a; color: #00ff00; padding: 20px; }
+        .container { max-width: 800px; margin: 0 auto; }
+        
+        /* Video Styling */
+        video { 
+            width: 100%; 
+            background: #000; 
+            border: 2px solid #333; 
+            transform: scaleX(-1); /* Mirror effect */
+        }
+
+        /* Controls */
+        .role-select { margin-bottom: 20px; padding: 20px; border: 1px solid #444; }
+        button { 
+            padding: 15px 30px; 
+            font-size: 18px; 
+            cursor: pointer; 
+            background: #333; 
+            color: white; 
+            border: 1px solid #00ff00; 
+            margin-right: 10px;
+        }
+        button:hover { background: #00ff00; color: black; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        /* Logs */
+        #logs { 
+            height: 150px; 
+            overflow-y: scroll; 
+            background: #000; 
+            border: 1px solid #333; 
+            padding: 10px; 
+            margin-top: 20px;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>🤖 Teleoperation Link</h1>
+    
+    <div class="role-select" id="roleSelection">
+        <h3>Step 1: Select Role</h3>
+        <button onclick="startAsRobot()">I am ROBOT (Streamer)</button>
+        <button onclick="startAsOperator()">I am OPERATOR (Acceptor)</button>
+    </div>
+
+    <div id="video-container">
+        <!-- Local video for Robot, Remote video for Operator -->
+        <video id="mainVideo" autoplay playsinline muted></video>
+    </div>
+
+    <div id="logs">System Ready...</div>
+</div>
+
+<script src="client.js"></script>
+</body>
+</html>
