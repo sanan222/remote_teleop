@@ -5,6 +5,7 @@ Dual-mode client supporting:
 - Operator Mode: Receives video and sends control commands
 """
 
+import argparse
 import asyncio
 import json
 import logging
@@ -47,12 +48,14 @@ logger = logging.getLogger(__name__)
 class WebRTCClient:
     """WebRTC client for robot teleoperation"""
     
-    def __init__(self, role):
+    def __init__(self, role, camera_type="rgb"):
         self.role = role  # 'robot' or 'operator'
+        self.camera_type = camera_type  # Camera type to stream
         self.pc = None
         self.ws = None
         self.data_channel = None
-        self.camera_track = None
+        self.camera_tracks = []  # Support multiple camera tracks
+        self.video_windows = {}  # Track window names for operator mode
         
     def _log(self, message):
         """Internal logging method"""
@@ -108,14 +111,25 @@ class WebRTCClient:
     
     def _setup_operator_handlers(self):
         """Setup event handlers for operator mode"""
+        self.track_counter = 0
+        
         @self.pc.on("track")
         def on_track(track):
             self._log(f"Video stream received: {track.kind}")
             if track.kind == "video":
-                asyncio.create_task(self._receive_video_frames(track))
+                self.track_counter += 1
+                asyncio.create_task(self._receive_video_frames(track, self.track_counter))
     
-    async def _receive_video_frames(self, track):
-        """Receive and display video frames in operator mode"""
+    async def _receive_video_frames(self, track, track_id):
+        """Receive and display video frames in operator mode
+        
+        Args:
+            track: Video track to receive frames from
+            track_id: Unique identifier for this track (used for window naming)
+        """
+        window_name = f"Camera {track_id}"
+        self.video_windows[track_id] = window_name
+        
         frame_count = 0
         display_enabled = True
         display_error_shown = False
@@ -128,24 +142,27 @@ class WebRTCClient:
                 
                 if display_enabled:
                     try:
-                        cv2.imshow('Video Stream', img)
+                        cv2.imshow(window_name, img)
                         if cv2.waitKey(1) & 0xFF == ord('q'):
-                            self._log("Video display closed by user")
+                            self._log(f"{window_name} display closed by user")
                             break
                     except cv2.error:
                         if not display_error_shown:
-                            self._log("Video display not available on this system")
+                            self._log(f"Video display not available on this system for {window_name}")
                             display_error_shown = True
                         display_enabled = False
                 
                 if frame_count % 30 == 0:
-                    self._log(f"Received {frame_count} frames")
+                    self._log(f"{window_name}: Received {frame_count} frames")
         
         except Exception as e:
-            self._log(f"Error receiving video: {str(e)}")
+            self._log(f"Error receiving video on {window_name}: {str(e)}")
         finally:
             if display_enabled:
-                cv2.destroyAllWindows()
+                try:
+                    cv2.destroyWindow(window_name)
+                except:
+                    pass
     
     def _setup_data_channel(self):
         """Setup data channel for operator mode"""
@@ -263,14 +280,55 @@ class WebRTCClient:
     
     async def start_as_robot(self):
         """Start client in robot mode"""
-        self._log("Starting as ROBOT (Streamer)")
+        self._log(f"Starting as ROBOT (Streamer) - Camera: {self.camera_type}")
         
         self._setup_peer_connection()
         
-        self.camera_track = CameraVideoTrack()
-        self.pc.addTrack(self.camera_track)
-        self._log("Camera track added")
+        # Create camera track based on selected type
+        try:
+            if self.camera_type == "rgb":
+                track = CameraVideoTrack(
+                    camera_type="rgb",
+                    camera_index=0,
+                    width=640,
+                    height=480,
+                    fps=30
+                )
+                self._log("RGB camera track added (index 0)")
+                
+            elif self.camera_type == "realsense_rgb":
+                track = CameraVideoTrack(
+                    camera_type="realsense",
+                    stream_type="color",
+                    width=640,
+                    height=480,
+                    fps=30
+                )
+                self._log("RealSense color track added")
+                
+            elif self.camera_type == "realsense_depth":
+                track = CameraVideoTrack(
+                    camera_type="realsense",
+                    stream_type="depth",
+                    width=640,
+                    height=480,
+                    fps=30
+                )
+                self._log("RealSense depth track added")
+            else:
+                raise ValueError(f"Invalid camera type: {self.camera_type}")
+            
+            self.camera_tracks.append(track)
+            self.pc.addTrack(track)
+            
+        except Exception as e:
+            self._log(f"Error: Failed to initialize camera: {e}")
+            raise
         
+        if not self.camera_tracks:
+            raise RuntimeError("No cameras could be initialized")
+        
+        self._log(f"Total {len(self.camera_tracks)} camera track(s) ready")
         await self._connect_to_signaling()
     
     async def start_as_operator(self):
@@ -278,7 +336,11 @@ class WebRTCClient:
         self._log("Starting as OPERATOR (Controller)")
         
         self._setup_peer_connection()
+        
+        # Add transceiver to receive single video track
         self.pc.addTransceiver('video', direction='recvonly')
+        self._log("Set up to receive 1 video track")
+        
         self._setup_data_channel()
         
         await self._connect_to_signaling()
@@ -287,28 +349,85 @@ class WebRTCClient:
         """Cleanup resources"""
         if self.pc:
             await self.pc.close()
-        if self.camera_track:
-            self.camera_track.stop()
+        
+        # Stop all camera tracks
+        for track in self.camera_tracks:
+            try:
+                track.stop()
+            except Exception as e:
+                self._log(f"Error stopping camera track: {e}")
+        
+        # Close all video windows
+        try:
+            cv2.destroyAllWindows()
+        except:
+            pass
 
 
 async def main():
     """Main entry point"""
-    print("=" * 60)
-    print("WebRTC Robot Teleoperation Client")
-    print("=" * 60)
-    print("\nSelect Role:")
-    print("1. Robot (Streamer)")
-    print("2. Operator (Controller)")
-    print("=" * 60)
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='WebRTC Robot Teleoperation Client')
+    parser.add_argument(
+        '--role',
+        type=str,
+        choices=['robot', 'operator'],
+        help='Client role: robot (streamer) or operator (controller)'
+    )
+    parser.add_argument(
+        '--camera',
+        type=str,
+        choices=['rgb', 'realsense_rgb', 'realsense_depth'],
+        default='rgb',
+        help='Camera type to stream (only for robot mode): rgb, realsense_rgb, or realsense_depth'
+    )
     
-    choice = input("\nEnter choice (1 or 2): ").strip()
+    args = parser.parse_args()
     
-    if choice not in ['1', '2']:
-        print("Invalid choice. Exiting.")
-        return
+    # Interactive mode if role not specified
+    if args.role is None:
+        print("=" * 60)
+        print("WebRTC Robot Teleoperation Client")
+        print("=" * 60)
+        print("\nSelect Role:")
+        print("1. Robot (Streamer)")
+        print("2. Operator (Controller)")
+        print("=" * 60)
+        
+        choice = input("\nEnter choice (1 or 2): ").strip()
+        
+        if choice not in ['1', '2']:
+            print("Invalid choice. Exiting.")
+            return
+        
+        role = 'robot' if choice == '1' else 'operator'
+        
+        # Ask for camera type if robot mode
+        if role == 'robot':
+            print("\nSelect Camera:")
+            print("1. RGB Camera")
+            print("2. RealSense RGB")
+            print("3. RealSense Depth")
+            print("=" * 60)
+            
+            cam_choice = input("\nEnter choice (1, 2, or 3): ").strip()
+            
+            if cam_choice == '1':
+                camera_type = 'rgb'
+            elif cam_choice == '2':
+                camera_type = 'realsense_rgb'
+            elif cam_choice == '3':
+                camera_type = 'realsense_depth'
+            else:
+                print("Invalid choice. Using RGB camera.")
+                camera_type = 'rgb'
+        else:
+            camera_type = 'rgb'  # Not used in operator mode
+    else:
+        role = args.role
+        camera_type = args.camera
     
-    role = 'robot' if choice == '1' else 'operator'
-    client = WebRTCClient(role)
+    client = WebRTCClient(role, camera_type=camera_type)
     
     try:
         if role == 'robot':
